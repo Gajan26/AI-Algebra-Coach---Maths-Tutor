@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url("https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=DM+Mono&display=swap");
+
+* { box-sizing: border-box; }
+body { margin: 0; background: #f8fafc; color: #172033; font-family: "DM Sans", sans-serif; }
+button, input { font: inherit; }
+button { cursor: pointer; }
+.app { min-height: 100vh; padding: 28px; }
+.header { max-width: 1280px; margin: 0 auto 20px; display: flex; align-items: baseline; justify-content: space-between; }
+.header h1 { margin: 0; font-size: 1.5rem; }.header span { color: #64748b; font-size: .9rem; }
+.split { max-width: 1280px; margin: auto; display: grid; grid-template-columns: 1.08fr .92fr; gap: 20px; }
+.panel { background: white; border: 1px solid #e2e8f0; border-radius: 18px; min-height: 680px; overflow: hidden; }
+.panel-title { padding: 20px 24px; border-bottom: 1px solid #e2e8f0; font-weight: 700; }
+.capture { padding: 20px 24px; border-bottom: 1px solid #e2e8f0; display: flex; gap: 10px; flex-wrap: wrap; }
+.button { border: 0; border-radius: 9px; padding: 10px 14px; background: #2563eb; color: white; font-weight: 700; }.button.alt { background: #e0e7ff; color: #3730a3; }.button:disabled { opacity: .55; cursor: wait; }
+.preview { width: 100%; max-height: 220px; object-fit: contain; background: #0f172a; }.steps { padding: 24px; }.step { padding: 15px; border-radius: 10px; border: 1px solid transparent; font-family: "DM Mono", monospace; }.step.highlight { background: #fffbeb; border-color: #fbbf24; }
+.feed { padding: 20px 24px; display: flex; min-height: 590px; flex-direction: column; gap: 12px; }.message { max-width: 90%; padding: 12px 14px; border-radius: 12px; background: #eff6ff; line-height: 1.45; }.message.student { margin-left: auto; background: #f1f5f9; }.status { color: #64748b; font-size: .9rem; }
+.reply { display: flex; gap: 10px; padding: 16px 20px; border-top: 1px solid #e2e8f0; }.reply input { min-width: 0; flex: 1; border: 1px solid #cbd5e1; border-radius: 9px; padding: 10px 12px; outline-color: #2563eb; }.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+video { width: 100%; max-height: 240px; background: #0f172a; object-fit: contain; }
+@media (max-width: 800px) { .app { padding: 14px; }.split { grid-template-columns: 1fr; }.panel { min-height: auto; }.feed { min-height: 260px; } }

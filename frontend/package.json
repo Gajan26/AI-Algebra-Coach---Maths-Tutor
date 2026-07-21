@@ -1,0 +1,7 @@
+{
+  "name": "ai-algebra-coach-client",
+  "private": true,
+  "scripts": { "dev": "next dev", "build": "next build", "start": "next start", "lint": "next lint" },
+  "dependencies": { "@tiptap/react": "^2.11.5", "@tiptap/starter-kit": "^2.11.5", "katex": "^0.16.21", "next": "^15.1.0", "react": "^19.0.0", "react-dom": "^19.0.0" },
+  "devDependencies": { "@types/node": "^22.0.0", "@types/react": "^19.0.0", "autoprefixer": "^10.4.20", "postcss": "^8.4.47", "tailwindcss": "^3.4.14", "typescript": "^5.7.0" }
+}

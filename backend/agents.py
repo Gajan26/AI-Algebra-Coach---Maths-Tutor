@@ -6,7 +6,7 @@ import os
 import re
 from typing import Literal
 
-from openai import AsyncOpenAI
+import anthropic
 from pydantic import BaseModel, Field
 
 
@@ -165,10 +165,10 @@ def respond_to_student(message: str, steps: list[MathStep]) -> CoachEvent:
     return CoachEvent(type="coach_message", payload={"message": prompt})
 
 
-async def generate_coach_reply(
+def generate_coach_reply(
     steps: list[MathStep], student_message: str = "", history: list[dict[str, str]] | None = None
 ) -> CoachEvent:
-    """Use the model for broad Algebra coaching, with a local fallback if unavailable."""
+    """Use Claude for broad Algebra coaching, with a local fallback if unavailable."""
     work = "\n".join(f"Line {step.line}: {step.latex}" for step in steps) or "No transcribed steps yet."
     dialogue = "\n".join(f"{item['sender'].title()}: {item['text']}" for item in (history or [])[-12:])
     user_prompt = (
@@ -176,19 +176,19 @@ async def generate_coach_reply(
         f"\n\nStudent's latest reply: {student_message or '(They have not replied yet.)'}"
     )
     try:
-        client = AsyncOpenAI()
-        completion = await client.chat.completions.create(
-            model=os.environ.get("COACH_MODEL", "gpt-4o"),
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        message = client.messages.create(
+            model=os.environ.get("COACH_MODEL", "claude-3-5-sonnet-20241022"),
+            max_tokens=180,
+            temperature=0.3,
+            system=SOCRATIC_COACH_PROMPT,
             messages=[
-                {"role": "system", "content": SOCRATIC_COACH_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.3,
-            max_tokens=180,
         )
-        message = completion.choices[0].message.content
-        if message:
-            return CoachEvent(type="coach_message", payload={"message": message.strip()})
+        response_text = message.content[0].text if message.content else None
+        if response_text:
+            return CoachEvent(type="coach_message", payload={"message": response_text.strip()})
     except Exception:
         # The vision request has already verified credentials in normal use; retain
         # helpful local guidance if a later coach request cannot reach the model.

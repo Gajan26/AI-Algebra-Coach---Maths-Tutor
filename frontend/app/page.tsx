@@ -69,8 +69,16 @@ export default function Home() {
       const response = await fetch(`${API_URL}/api/vision/process`, { method: "POST", body });
       if (!response.ok) throw new Error((await response.json()).detail ?? "Could not process this image.");
       const result = (await response.json()) as { steps: Step[] };
-      setSteps(result.steps); evaluate(result.steps);
-      setFeed((items) => [...items, { sender: "student", text: "Here are my handwritten algebra steps." }]);
+
+      // Append new steps to existing ones (for multi-step uploads)
+      const newSteps = [...steps];
+      for (const newStep of result.steps) {
+        const maxLine = Math.max(0, ...newSteps.map(s => s.line));
+        newSteps.push({ ...newStep, line: maxLine + newStep.line });
+      }
+
+      setSteps(newSteps); evaluate(newSteps);
+      setFeed((items) => [...items, { sender: "student", text: steps.length === 0 ? "Here are my handwritten algebra steps." : "I've added the next step(s)." }]);
     } catch (error) {
       setFeed((items) => [...items, { sender: "system", text: error instanceof Error ? error.message : "Image processing failed." }]);
     } finally { setBusy(false); }
@@ -83,10 +91,22 @@ export default function Home() {
 
   async function openCamera() {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
-      if (videoRef.current) videoRef.current.srcObject = stream;
+      // Try with facingMode for mobile first, fallback to default for Mac
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+      } catch {
+        // Fallback: just request any video without facingMode (works on Mac)
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      }
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play().catch(e => console.error("Play error:", e));
+      }
       setCameraOpen(true);
-    } catch { setFeed((items) => [...items, { sender: "system", text: "Camera access was not available. Try uploading an image instead." }]); }
+    } catch (e) {
+      setFeed((items) => [...items, { sender: "system", text: "Camera access was not available. Make sure to allow camera permission in your browser settings." }]);
+    }
   }
 
   function stopCamera() {
@@ -110,10 +130,8 @@ export default function Home() {
       <article className="panel"><div className="panel-title">Your algebra canvas</div>
         <div className="capture">
           <label className="button">Upload image<input aria-label="Upload homework image" type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={onUpload} /></label>
-          {!cameraOpen ? <button className="button alt" onClick={() => void openCamera()}>Open camera</button> : <><button className="button" onClick={captureCamera}>Capture homework</button><button className="button alt" onClick={stopCamera}>Close camera</button></>}
           {busy && <span className="status">Reading your work…</span>}
         </div>
-        {cameraOpen && <video ref={videoRef} autoPlay playsInline aria-label="Camera preview" />}
         {preview && <img className="preview" src={preview} alt="Uploaded homework preview" />}
         <div className="steps">{steps.some((step) => !step.hiddenOnCanvas) ? steps.filter((step) => !step.hiddenOnCanvas).map((step) => <div className={`step ${highlightLine === step.line ? "highlight" : ""}`} key={step.line}><small>Line {step.line}</small><div dangerouslySetInnerHTML={{ __html: katex.renderToString(step.latex, { throwOnError: false, displayMode: true }) }} /></div>) : <p className="status">Your transcribed mathematical steps will appear here.</p>}</div>
       </article>

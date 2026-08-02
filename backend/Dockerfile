@@ -1,5 +1,5 @@
 # Multi-stage build for AI Algebra Coach backend
-# Build image
+# Build stage
 FROM python:3.11-slim as builder
 
 WORKDIR /app

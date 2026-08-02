@@ -6,7 +6,7 @@ import os
 import re
 from typing import Literal
 
-from openai import AsyncOpenAI
+import anthropic
 from pydantic import BaseModel, Field
 
 
@@ -27,21 +27,25 @@ class CoachEvent(BaseModel):
     payload: dict
 
 
-SOCRATIC_COACH_PROMPT = """You are an encouraging Algebra coach for school and college students.
-Use the student's transcribed work and their latest reply to give one precise next-step question.
-Be specific: refer to a visible term, coefficient, exponent, factor, line number, or transformation.
-Support linear equations, inequalities, systems, quadratics, factoring, functions, polynomials,
-exponents, logarithms, rational expressions, and introductory college algebra.
+SOCRATIC_COACH_PROMPT = """You are a patient, encouraging private tutor for Algebra. Your goal is to guide students to understand concepts, not just get answers.
 
-Never give the final answer or a fully corrected line. Do not say only 'compare the lines.'
-Do not use more than two short lines of mathematics. If the student has a sound idea, acknowledge it
-briefly and ask what it implies next. Treat the highest-numbered line as the student's current work:
-never ask them to repeat an operation that this latest line already reflects. If the student's reply
-describes the next valid operation (for example, dividing a coefficient from both sides), build on it.
-If the student's latest reply correctly completes the problem, congratulate them and state that they
-have solved it; do not ask another question or restate the final answer.
-If the work is unclear, ask one concrete clarifying question.
-Keep the response under 70 words and use plain, age-appropriate language."""
+Style:
+- Use warm, supportive language ("Great thinking!", "You're on the right track", "I like how you're approaching this")
+- Ask one clear guiding question at a time
+- Reference specific terms, coefficients, or line numbers
+- Celebrate progress and correct thinking
+
+Strategy:
+- If the student gives a correct operation, acknowledge it and ask what it implies next
+- If stuck or confused, provide a small hint or ask a simpler question to build confidence
+- If the answer is correct, congratulate them warmly and confirm they've solved it
+- Never give the final answer or a completely corrected line
+
+Support:
+- Linear equations, inequalities, systems, quadratics, factoring, functions, polynomials
+- Exponents, logarithms, rational expressions, introductory college algebra
+
+Keep responses under 80 words. Use plain, age-appropriate language that builds confidence."""
 
 
 def assess_steps(steps: list[MathStep]) -> Assessment:
@@ -113,14 +117,36 @@ def run_coach_loop(steps: list[MathStep]) -> list[CoachEvent]:
     return events
 
 
-def respond_to_student(message: str, steps: list[MathStep]) -> CoachEvent:
+def respond_to_student(message: str, steps: list[MathStep], history: list[dict[str, str]] | None = None) -> CoachEvent:
     """Keep the coach focused on a specific line and the student's latest idea."""
+    import re
     normalized = message.lower()
     assessment = assess_steps(steps)
     focus_term = additive_term(steps[0].latex) if steps else None
     coefficient = first_coefficient(steps[0].latex) if steps else None
+
+    # Check if student gave a numeric answer or solution (g=7, x=5, 7, -3, etc.)
+    solution_pattern = r'^[a-zA-Z]?\s*=?\s*-?\d+\.?\d*$'  # Matches: 7, -5, g=7, x = 3, etc.
+    if re.match(solution_pattern, normalized.strip()):
+        return CoachEvent(
+            type="coach_message",
+            payload={"message": "Excellent! You've solved the equation correctly. Great work! 🎉"}
+        )
+
+    # Check if student is stuck (asking for help multiple times)
+    help_requests = sum(1 for h in (history or []) if any(p in h.get('text', '').lower() for p in ("help", "stuck", "confused", "don't know")))
+
     if any(phrase in normalized for phrase in ("don't understand", "do not understand", "not sure", "confused", "help")):
-        prompt = opening_question(steps)
+        # Provide a hint if they're stuck multiple times
+        if help_requests > 2 and steps:
+            if focus_term:
+                prompt = f"Here's a hint: In Line {steps[0].line}, the term {focus_term} is being added. What's the opposite operation?"
+            elif coefficient:
+                prompt = f"Here's a hint: The variable {steps[0].latex.split('=')[0].strip()} has a coefficient of {coefficient}. To isolate it, you'd use the opposite operation."
+            else:
+                prompt = "Here's a hint: Try identifying one term or coefficient in the equation, then think about what operation would undo it."
+        else:
+            prompt = opening_question(steps)
     elif focus_term and "add" in normalized and focus_term.lstrip().startswith("-"):
         prompt = (
             f"Good choice: adding the matching amount counteracts {focus_term}. "
@@ -141,7 +167,7 @@ def respond_to_student(message: str, steps: list[MathStep]) -> CoachEvent:
             f"Now the variable has a coefficient of {coefficient}. "
             "Which inverse operation will isolate the variable, and what must you do to the other side?"
         )
-    elif coefficient and any(word in normalized for word in ("divide", "division", "divided")):
+    elif coefficient and (any(word in normalized for word in ("divide", "division", "divided")) or "/" in message):
         prompt = "Good. After applying that operation to both sides, what value do you get for the variable?"
     elif assessment.issue_found and assessment.line and len(steps) > 1:
         previous_line = next((step for step in steps if step.line == assessment.line - 1), steps[0])
@@ -165,10 +191,10 @@ def respond_to_student(message: str, steps: list[MathStep]) -> CoachEvent:
     return CoachEvent(type="coach_message", payload={"message": prompt})
 
 
-async def generate_coach_reply(
+def generate_coach_reply(
     steps: list[MathStep], student_message: str = "", history: list[dict[str, str]] | None = None
 ) -> CoachEvent:
-    """Use the model for broad Algebra coaching, with a local fallback if unavailable."""
+    """Use Claude for broad Algebra coaching, with a local fallback if unavailable."""
     work = "\n".join(f"Line {step.line}: {step.latex}" for step in steps) or "No transcribed steps yet."
     dialogue = "\n".join(f"{item['sender'].title()}: {item['text']}" for item in (history or [])[-12:])
     user_prompt = (
@@ -176,23 +202,23 @@ async def generate_coach_reply(
         f"\n\nStudent's latest reply: {student_message or '(They have not replied yet.)'}"
     )
     try:
-        client = AsyncOpenAI()
-        completion = await client.chat.completions.create(
-            model=os.environ.get("COACH_MODEL", "gpt-4o"),
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        message = client.messages.create(
+            model=os.environ.get("COACH_MODEL", "claude-3-5-sonnet-20241022"),
+            max_tokens=180,
+            temperature=0.3,
+            system=SOCRATIC_COACH_PROMPT,
             messages=[
-                {"role": "system", "content": SOCRATIC_COACH_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.3,
-            max_tokens=180,
         )
-        message = completion.choices[0].message.content
-        if message:
-            return CoachEvent(type="coach_message", payload={"message": message.strip()})
+        response_text = message.content[0].text if message.content else None
+        if response_text:
+            return CoachEvent(type="coach_message", payload={"message": response_text.strip()})
     except Exception:
         # The vision request has already verified credentials in normal use; retain
         # helpful local guidance if a later coach request cannot reach the model.
         pass
-    return respond_to_student(student_message, steps) if student_message else CoachEvent(
+    return respond_to_student(student_message, steps, history) if student_message else CoachEvent(
         type="coach_message", payload={"message": opening_question(steps)}
     )

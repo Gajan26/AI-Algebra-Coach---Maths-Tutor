@@ -34,6 +34,11 @@ export default function Home() {
       if (event.type === "highlight") setHighlightLine(Number(event.payload.line));
       if (event.type === "error") setFeed((items) => [...items, { sender: "system", text: String(event.payload.message) }]);
     };
+    ws.onclose = (event) => {
+      if (event.code === 1013) {
+        setFeed((items) => [...items, { sender: "system", text: "Too many connections — please wait a bit before trying again." }]);
+      }
+    };
     socketRef.current = ws;
     return ws;
   }

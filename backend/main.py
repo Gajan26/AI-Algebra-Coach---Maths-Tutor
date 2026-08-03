@@ -8,13 +8,14 @@ import os
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import anthropic
 from pydantic import BaseModel, Field, ValidationError
 from dotenv import load_dotenv
 
 from agents import MathStep, generate_coach_reply, run_coach_loop
+from rate_limit import check as rate_limit_check
 
 # Load only the local backend secret file. It is intentionally git-ignored.
 load_dotenv(Path(__file__).with_name(".env"), override=True)
@@ -34,6 +35,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+VISION_RATE_LIMIT_PER_HOUR = int(os.getenv("VISION_RATE_LIMIT_PER_HOUR", "15"))
+WS_CONNECT_LIMIT_PER_HOUR = int(os.getenv("WS_CONNECT_LIMIT_PER_HOUR", "20"))
+WS_MESSAGE_LIMIT_PER_HOUR = int(os.getenv("WS_MESSAGE_LIMIT_PER_HOUR", "60"))
 
 VISION_PROMPT = """You transcribe handwritten Algebra homework. Return only JSON in this exact shape:
 {"steps": [{"line": 1, "latex": "3x + 5 = 20"}]}
@@ -89,7 +94,14 @@ def transcribe_image(image: bytes, mime_type: str) -> VisionResult:
 
 
 @app.post("/api/vision/process", response_model=VisionResult)
-async def process_vision(image: UploadFile = File(...)) -> VisionResult:
+async def process_vision(request: Request, image: UploadFile = File(...)) -> VisionResult:
+    client_ip = request.client.host if request.client else "unknown"
+    if not rate_limit_check(client_ip, "vision", VISION_RATE_LIMIT_PER_HOUR, 3600):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many uploads — please wait a bit before trying again.",
+            headers={"Retry-After": "3600"},
+        )
     if image.content_type not in {"image/jpeg", "image/png", "image/webp"}:
         raise HTTPException(status_code=415, detail="Upload a JPEG, PNG, or WebP image.")
     payload = await image.read()
@@ -100,6 +112,10 @@ async def process_vision(image: UploadFile = File(...)) -> VisionResult:
 
 @app.websocket("/ws/session/{session_id}")
 async def session_socket(websocket: WebSocket, session_id: UUID) -> None:
+    client_ip = websocket.client.host if websocket.client else "unknown"
+    if not rate_limit_check(client_ip, "ws_connect", WS_CONNECT_LIMIT_PER_HOUR, 3600):
+        await websocket.close(code=1013, reason="Too many connections. Please try again later.")
+        return
     await websocket.accept()
     try:
         while True:
@@ -109,11 +125,16 @@ async def session_socket(websocket: WebSocket, session_id: UUID) -> None:
             except (json.JSONDecodeError, ValidationError):
                 await websocket.send_json({"type": "error", "payload": {"message": "Invalid session message."}})
                 continue
-            if message.type != "evaluate":
-                if message.type == "student_response" and message.message.strip():
-                    await websocket.send_json(generate_coach_reply(message.steps, message.message.strip(), message.history).model_dump())
-                    continue
+            if message.type not in {"evaluate", "student_response"} or (
+                message.type == "student_response" and not message.message.strip()
+            ):
                 await websocket.send_json({"type": "error", "payload": {"message": "Unsupported or empty session message."}})
+                continue
+            if not rate_limit_check(client_ip, "ws_message", WS_MESSAGE_LIMIT_PER_HOUR, 3600):
+                await websocket.send_json({"type": "error", "payload": {"message": "Too many messages — please wait a bit before continuing."}})
+                continue
+            if message.type == "student_response":
+                await websocket.send_json(generate_coach_reply(message.steps, message.message.strip(), message.history).model_dump())
                 continue
             for event in run_coach_loop(message.steps):
                 if event.type != "coach_message":

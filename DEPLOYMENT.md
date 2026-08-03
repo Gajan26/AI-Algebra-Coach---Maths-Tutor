@@ -49,20 +49,17 @@ CORS_ORIGINS=https://yourdomain.com,https://www.yourdomain.com
 ```
 
 **Rate Limiting:**
-Add rate limiting to prevent abuse:
-```python
-# backend/main.py
-from slowapi import Limiter
-from slowapi.util import get_remote_address
+Per-IP rate limiting is already implemented (`backend/rate_limit.py`), applied to both
+`/api/vision/process` and the `/ws/session/{id}` WebSocket (connection and message limits).
+It's an in-memory sliding-window limiter — fine for a single Railway/Render replica, but
+resets on redeploy and isn't shared across replicas. If you ever scale to multiple replicas,
+swap it for a Redis-backed limiter (e.g. `slowapi` with a Redis storage backend).
+Limits are configurable via `VISION_RATE_LIMIT_PER_HOUR`, `WS_CONNECT_LIMIT_PER_HOUR`, and
+`WS_MESSAGE_LIMIT_PER_HOUR` (see Environment Configuration below).
 
-limiter = Limiter(key_func=get_remote_address)
-app.state.limiter = limiter
-
-@app.post("/api/vision/process")
-@limiter.limit("30/hour")  # 30 requests per hour per IP
-async def process_vision(image: UploadFile = File(...)):
-    ...
-```
+Because the platform edge proxy sits in front of the app, the container must trust
+`X-Forwarded-For` to see real client IPs rather than the proxy's — this is handled by
+`--proxy-headers --forwarded-allow-ips='*'` in `backend/Dockerfile`'s uvicorn command.
 
 ---
 
@@ -407,6 +404,9 @@ docker-compose logs -f
 | `VISION_MODEL` | `claude-3-5-sonnet-20241022` | Model for image transcription |
 | `COACH_MODEL` | `claude-3-5-sonnet-20241022` | Model for Socratic feedback |
 | `ENVIRONMENT` | `development` | Set to `production` for prod |
+| `VISION_RATE_LIMIT_PER_HOUR` | `15` | Max image uploads per IP per hour |
+| `WS_CONNECT_LIMIT_PER_HOUR` | `20` | Max new WebSocket connections per IP per hour |
+| `WS_MESSAGE_LIMIT_PER_HOUR` | `60` | Max coaching messages per IP per hour |
 
 ### Frontend Environment Variables
 

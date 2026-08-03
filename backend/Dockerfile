@@ -32,14 +32,16 @@ ENV PATH=/root/.local/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1
 
 # Copy application code
-COPY main.py agents.py ./
+COPY main.py agents.py rate_limit.py ./
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/docs || exit 1
+    CMD curl -f http://localhost:${PORT:-8000}/docs || exit 1
 
 # Expose port
 EXPOSE 8000
 
-# Run the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run the application (Railway/Render inject PORT at runtime)
+# --proxy-headers/--forwarded-allow-ips trust X-Forwarded-For from the platform edge proxy,
+# so rate limiting sees real client IPs instead of the proxy's.
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*'"]

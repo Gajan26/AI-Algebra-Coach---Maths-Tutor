@@ -117,6 +117,7 @@ async def session_socket(websocket: WebSocket, session_id: UUID) -> None:
         await websocket.close(code=1013, reason="Too many connections. Please try again later.")
         return
     await websocket.accept()
+    evaluated_step_count = 0
     try:
         while True:
             raw = await websocket.receive_text()
@@ -136,9 +137,9 @@ async def session_socket(websocket: WebSocket, session_id: UUID) -> None:
             if message.type == "student_response":
                 await websocket.send_json(generate_coach_reply(message.steps, message.message.strip(), message.history).model_dump())
                 continue
-            for event in run_coach_loop(message.steps):
-                if event.type != "coach_message":
-                    await websocket.send_json(event.model_dump())
-            await websocket.send_json(generate_coach_reply(message.steps).model_dump())
+            new_line_count = max(len(message.steps) - evaluated_step_count, 0)
+            for event in run_coach_loop(message.steps, new_line_count):
+                await websocket.send_json(event.model_dump())
+            evaluated_step_count = len(message.steps)
     except WebSocketDisconnect:
         return

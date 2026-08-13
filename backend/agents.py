@@ -7,7 +7,9 @@ import re
 from typing import Literal
 
 import anthropic
+import sympy as sp
 from pydantic import BaseModel, Field
+from sympy.parsing.latex import parse_latex
 
 
 class MathStep(BaseModel):
@@ -20,6 +22,7 @@ class Assessment(BaseModel):
     line: int | None = None
     snippet: str | None = None
     misconception: str | None = None
+    kind: Literal["sign_crossing", "not_equivalent"] | None = None
 
 
 class CoachEvent(BaseModel):
@@ -48,34 +51,79 @@ Support:
 Keep responses under 80 words. Use plain, age-appropriate language that builds confidence."""
 
 
-def assess_steps(steps: list[MathStep]) -> Assessment:
-    """Catch the common sign error while leaving richer assessment to a model later.
+def _equation_from_latex(latex: str) -> sp.Eq:
+    left, right = latex.replace("−", "-").split("=", 1)
+    return sp.Eq(parse_latex(left, backend="lark"), parse_latex(right, backend="lark"))
 
-    This deterministic check makes the real-time experience reliable for the core
-    algebra misconception in the product brief.
+
+def _solutions_match(previous_latex: str, current_latex: str) -> bool | None:
+    """Compare the solution sets of two equation steps.
+
+    Returns None (cannot verify) instead of flagging when the LaTeX can't be
+    parsed, isn't a single-variable equation, or has no real solutions —
+    fails open so a parsing gap never produces a false accusation.
+    """
+    try:
+        equation_before = _equation_from_latex(previous_latex)
+        equation_after = _equation_from_latex(current_latex)
+    except Exception:
+        return None
+    symbols = equation_before.free_symbols | equation_after.free_symbols
+    if len(symbols) != 1:
+        return None
+    (symbol,) = symbols
+    try:
+        solutions_before = sp.solveset(equation_before, symbol, domain=sp.S.Reals)
+        solutions_after = sp.solveset(equation_after, symbol, domain=sp.S.Reals)
+    except Exception:
+        return None
+    if solutions_before == sp.S.EmptySet or solutions_after == sp.S.EmptySet:
+        return None
+    return solutions_before == solutions_after
+
+
+def _classify_misconception(previous_latex: str, current_latex: str) -> tuple[Literal["sign_crossing", "not_equivalent"], str]:
+    left_before, right_before = previous_latex.replace("−", "-").split("=", 1)
+    left_after, right_after = current_latex.replace("−", "-").split("=", 1)
+    if "+" in left_before and "+" not in left_after and "+" in right_after:
+        return "sign_crossing", "A positive term was moved across the equals sign without changing its operation."
+    return "not_equivalent", "This step isn't algebraically equivalent to the line before it — solving each side gives a different value."
+
+
+def assess_steps(steps: list[MathStep]) -> Assessment:
+    """Verify each step preserves the equation's solution set.
+
+    Uses a symbolic (SymPy) equivalence check rather than a language model —
+    this only needs to catch broken algebra, not carry on a conversation.
     """
     for previous, current in zip(steps, steps[1:]):
-        if "+" in previous.latex and "=" in previous.latex and "+" in current.latex:
-            left_before, right_before = previous.latex.split("=", 1)
-            left_after, right_after = current.latex.split("=", 1)
-            if "+" in left_before and "+" not in left_after and "+" in right_after:
-                return Assessment(
-                    issue_found=True,
-                    line=current.line,
-                    snippet=current.latex,
-                    misconception="A positive term was moved across the equals sign without changing its operation.",
-                )
+        if "=" not in previous.latex or "=" not in current.latex:
+            continue
+        if _solutions_match(previous.latex, current.latex) is False:
+            kind, misconception = _classify_misconception(previous.latex, current.latex)
+            return Assessment(
+                issue_found=True,
+                line=current.line,
+                snippet=current.latex,
+                misconception=misconception,
+                kind=kind,
+            )
     return Assessment(issue_found=False)
 
 
 def pedagogical_question(assessment: Assessment) -> str:
     """Return a Socratic prompt, never a corrected step or an answer."""
-    if assessment.issue_found:
+    if not assessment.issue_found:
+        return "Compare each line with the one before it. Which operation did you apply to both sides?"
+    if assessment.kind == "sign_crossing":
         return (
             f"Look at line {assessment.line}. When a positive term crosses the equals sign, "
             "what operation should undo it?"
         )
-    return "Compare each line with the one before it. Which operation did you apply to both sides?"
+    return (
+        f"Look at line {assessment.line} and compare it with the line before it. "
+        "Try re-doing that step by hand — does it match what you wrote?"
+    )
 
 
 def additive_term(latex: str) -> str | None:
@@ -94,17 +142,42 @@ def first_coefficient(latex: str) -> str | None:
 def opening_question(steps: list[MathStep]) -> str:
     if not steps:
         return "What would you like to work on first?"
-    term = additive_term(steps[0].latex)
+    return question_for_step(steps[0], is_first=True)
+
+
+def question_for_step(step: MathStep, *, is_first: bool) -> str:
+    """Ask about a specific line — the first line of a brand-new problem, or the
+    newest line a student just added to work already in progress."""
+    term = additive_term(step.latex)
+    if is_first:
+        if term:
+            return f"In Line {step.line}, focus on {term}. What operation would cancel that term, and where must you apply it?"
+        return "Which operation would help isolate the variable while keeping both sides balanced?"
     if term:
-        return f"In Line {steps[0].line}, focus on {term}. What operation would cancel that term, and where must you apply it?"
-    return "Which operation would help isolate the variable while keeping both sides balanced?"
+        return f"Line {step.line} is in. Focus on {term} — what operation would cancel that term, and where must you apply it?"
+    return f"Line {step.line} is in. What operation would you apply next to keep isolating the variable?"
 
 
-def run_coach_loop(steps: list[MathStep]) -> list[CoachEvent]:
+def evaluate_message(steps: list[MathStep], new_line_count: int, assessment: Assessment) -> str:
+    """Pick the coach's reply to a set of transcribed/typed steps without calling the model.
+
+    `new_line_count` is how many of `steps` were just added (vs. already evaluated
+    earlier in the session), so a second photo upload gets a question about the
+    newest line rather than repeating the opening question for line 1.
+    """
+    if assessment.issue_found:
+        return pedagogical_question(assessment)
+    if not steps:
+        return "What would you like to work on first?"
+    return question_for_step(steps[-1], is_first=new_line_count >= len(steps))
+
+
+def run_coach_loop(steps: list[MathStep], new_line_count: int | None = None) -> list[CoachEvent]:
     assessment = assess_steps(steps)
+    effective_new_line_count = len(steps) if new_line_count is None else new_line_count
     events = [
         CoachEvent(type="assessment", payload=assessment.model_dump()),
-        CoachEvent(type="coach_message", payload={"message": pedagogical_question(assessment) if len(steps) > 1 else opening_question(steps)}),
+        CoachEvent(type="coach_message", payload={"message": evaluate_message(steps, effective_new_line_count, assessment)}),
     ]
     if assessment.issue_found:
         events.append(
